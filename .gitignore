@@ -25,3 +25,10 @@ storage/
 tmp/
 temp/
 *.tmp
+
+tail -n 6 .gitignore
+cat >> .gitignore <<'EOF'
+
+# Dashboard authentication data
+dashboard/users.json
+dashboard/*.users.json

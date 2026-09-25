@@ -8,7 +8,9 @@ import hashlib
 import http.client
 import json
 import os
+import secrets
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -21,6 +23,15 @@ from harness import Cluster                           # noqa: E402  (read-only u
 from vault.api import make_server as make_gateway     # noqa: E402  (frozen, used as-is)
 from vault import Policy                              # noqa: E402
 import server as dash                                 # noqa: E402
+from auth import UserStore                            # noqa: E402
+
+
+
+def _temp_path() -> str:
+    """A fresh path for a users file (the file itself is created by UserStore)."""
+    fd, path = tempfile.mkstemp(suffix=".json")
+    os.close(fd)
+    return path
 
 
 class DashboardTest(unittest.TestCase):
@@ -31,20 +42,37 @@ class DashboardTest(unittest.TestCase):
         self.gw = make_gateway(self.c.vault, self.c.maint, port=0)
         threading.Thread(target=self.gw.serve_forever, daemon=True).start()
         gw_url = f"http://127.0.0.1:{self.gw.server_address[1]}"
-        self.srv, self.adapter = dash.make_server(gw_url, port=0)
+        # The dashboard requires login: these tests run as an admin.
+        self.users = _temp_path()
+        os.unlink(self.users)
+        password = secrets.token_urlsafe(16)
+        UserStore(self.users).set_user("tester", password, "admin")
+        self.srv, self.adapter = dash.make_server(gw_url, port=0, users=self.users)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.port = self.srv.server_address[1]
+        self.cookie, self.csrf = None, None
+        status, h, body = self.req("POST", "/api/login", json.dumps({"username": "tester", "password": password}),
+                                   {"Content-Type": "application/json"})
+        assert status == 200, body
+        self.cookie = h["Set-Cookie"].split(";")[0]
+        self.csrf = json.loads(body)["csrf"]
 
     def tearDown(self):
         self.srv.shutdown(); self.srv.server_close(); self.adapter.close()
         if self.gw is not None:
             self.gw.shutdown(); self.gw.server_close()
         self.c.close()
+        os.unlink(self.users)
 
     def req(self, method, path, body=None, headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        headers = dict(headers or {})
+        if self.cookie:
+            headers.setdefault("Cookie", self.cookie)
+        if self.csrf and method not in ("GET", "HEAD"):
+            headers.setdefault("X-CSRF-Token", self.csrf)
         try:
-            conn.request(method, path, body=body, headers=headers or {})
+            conn.request(method, path, body=body, headers=headers)
             r = conn.getresponse()
             return r.status, dict(r.getheaders()), r.read()
         finally:
@@ -151,7 +179,7 @@ class DashboardTest(unittest.TestCase):
         status, snap = self.json("GET", "/api/snapshot")
         self.assertEqual(status, 200)
         self.assertFalse(snap["gateway"]["ok"])
-        self.assertEqual(self.req("GET", "/api/gw/cluster")[0], 502)
+        self.assertEqual(self.req("GET", "/api/gw/buckets")[0], 502)
         self.gw = None  # already shut down
 
     def test_adapter_does_not_leak(self):

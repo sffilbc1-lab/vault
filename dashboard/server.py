@@ -17,16 +17,25 @@ Vault endpoints, except two things it observes itself and labels as such:
   (download the object through the gateway, recompute SHA-256, compare to the
   ETag Vault recorded at write time).
 
-Run:  python3 dashboard/server.py --gateway http://127.0.0.1:8080 --port 8090
+Access requires login (see dashboard/auth.py). Viewers get read-only access;
+admins can also use the dashboard's administrative and demo controls. The
+adapter forwards only the gateway operations the dashboard itself uses;
+everything else is refused for everyone.
+
+Run:  python3 dashboard/server.py --gateway http://127.0.0.1:8080 --port 8090 \
+          --users ~/.vault-dashboard/users.json
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
+import hmac
 import http.client
 import json
 import mimetypes
+import os
 import random
 import signal
 import threading
@@ -36,6 +45,11 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
+
+try:
+    from .auth import Auth, UserStore  # imported as package (dashboard.server)
+except ImportError:
+    from auth import Auth, UserStore   # run as a script from dashboard/
 
 STATIC = Path(__file__).resolve().parent / "static"
 CLIENT_ID = "vault-dashboard"
@@ -95,6 +109,10 @@ class Adapter:
         self._activity: deque[dict] = deque(maxlen=500)
         self._verifications: dict[str, dict] = {}
         self._last_maintenance: dict | None = None
+        self._actor = threading.local()  # who is making the current request (per thread)
+
+    def set_actor(self, username: str | None) -> None:
+        self._actor.name = username
 
     def close(self) -> None:
         self._pool.shutdown(wait=True, cancel_futures=True)
@@ -102,9 +120,10 @@ class Adapter:
     # -- dashboard-observed state -----------------------------------------------
 
     def record(self, kind: str, **detail) -> None:
+        user = getattr(self._actor, "name", None)
         with self._lock:
             self._activity.appendleft({"ts": time.time(), "kind": kind, "source": "dashboard",
-                                       **detail})
+                                       **({"user": user} if user else {}), **detail})
 
     def activity(self) -> list[dict]:
         with self._lock:
@@ -273,44 +292,179 @@ def _q(s: str) -> str:
     return quote(s, safe="")
 
 
+# ---------------------------------------------------------------- access control
+PUBLIC = "public"
+VIEWER = "viewer"
+ADMIN = "admin"
+DENY = "deny"
+RANK = {VIEWER: 1, ADMIN: 2}
+LOGIN_ASSETS = {"/login", "/static/login.html", "/static/login.js", "/static/app.css"}
+
+
+def required_role(method: str, path: str) -> str | None:
+    """Minimum role for a request, DENY for things the dashboard never offers, None = unknown."""
+    if method in ("GET", "HEAD") and path in LOGIN_ASSETS:
+        return PUBLIC
+    if path == "/api/login":
+        return PUBLIC if method == "POST" else DENY
+    if path == "/api/logout":
+        return VIEWER if method == "POST" else DENY
+    if path in ("/api/session", "/api/snapshot"):
+        return VIEWER if method == "GET" else DENY
+    if path.startswith("/api/verify/"):
+        return VIEWER if method == "POST" else DENY
+    if path.startswith("/api/nodes/"):
+        _, _, action = path[len("/api/nodes/"):].partition("/")
+        return ADMIN if method == "POST" and action in ("faults", "corrupt-random") else DENY
+    if path.startswith("/api/gw/"):
+        return gateway_role(method, path[len("/api/gw"):])
+    if path.startswith("/api/"):
+        return None
+    return VIEWER if method in ("GET", "HEAD") else DENY  # the dashboard app itself
+
+
+def gateway_role(method: str, gw_path: str) -> str:
+    """Only the gateway operations the dashboard UI uses are forwarded."""
+    if any(unquote(seg) in ("", ".", "..") for seg in gw_path.strip("/").split("/")):
+        return DENY  # no dot-segments or empty segments, encoded or not
+    parts = gw_path.strip("/").split("/", 2)
+    if parts[0] == "buckets":
+        if len(parts) == 1 or (len(parts) == 2 and parts[1]):
+            if method in ("GET", "HEAD"):
+                return VIEWER                     # list buckets / list objects
+            if method == "PUT" and len(parts) == 2:
+                return ADMIN                      # create bucket
+        elif len(parts) == 3 and parts[1] and parts[2]:
+            if method in ("GET", "HEAD"):
+                return VIEWER                     # download
+            if method in ("PUT", "DELETE"):
+                return ADMIN                      # upload / delete object
+    if method == "POST" and parts == ["cluster", "maintenance"]:
+        return ADMIN
+    if method == "POST" and len(parts) == 3 and parts[:2] == ["cluster", "nodes"] and parts[2].endswith("/drain") \
+            and parts[2].count("/") == 1:
+        return ADMIN
+    return DENY  # e.g. node remove/add, bucket delete, raw cluster status
+
+
+def for_viewer(snap: dict) -> dict:
+    """Remove detailed records (addresses, fault state, errors, who did what) for viewers."""
+    s = copy.deepcopy(snap)
+    gw = s.get("gateway", {})
+    s["gateway"] = {k: gw[k] for k in ("ok", "latency_ms") if k in gw}
+    if not gw.get("ok"):
+        s["gateway"]["error"] = "gateway unavailable"
+    for n in (s.get("cluster") or {}).get("nodes", []):
+        n.pop("addr", None)
+    s["nodes_live"] = {nid: {k: v for k, v in live.items() if k in ("reachable", "latency_ms", "health")}
+                       for nid, live in (s.get("nodes_live") or {}).items()}
+    for live in s["nodes_live"].values():
+        if isinstance(live.get("health"), dict):
+            live["health"] = {k: live["health"][k] for k in ("blobs", "bytes") if k in live["health"]}
+    s["activity"] = [{k: v for k, v in a.items() if k != "user"} for a in s.get("activity", [])]
+    # Vault's own events carry node addresses too (e.g. node_added)
+    if isinstance(s.get("events"), list):
+        s["events"] = [{k: v for k, v in e.items() if k != "addr"} for e in s["events"]]
+    s.pop("errors", None)
+    return s
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "VaultDashboard/1.0"
     protocol_version = "HTTP/1.1"
     adapter: Adapter
+    auth: Auth
+    frame_ancestors: str = "'none'"
+    session = None
+    role: str | None = None
 
     def log_message(self, *args):
         pass
 
     # -- helpers --------------------------------------------------------------------
 
+    def _body_pending(self) -> bool:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 1
+        return length > 0 and not self._consumed
+
     def _send(self, status: int, body: bytes, ctype: str, extra: dict | None = None):
+        # A request body we didn't read would otherwise be parsed as the next request on
+        # this keep-alive connection. Close it instead.
+        if self._body_pending():
+            self.close_connection = True
+            extra = {**(extra or {}), "Connection": "close"}
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._security_headers()
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _security_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy",
+                         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                         "img-src 'self' data:; form-action 'self'; base-uri 'none'; "
+                         f"frame-ancestors {self.frame_ancestors}")
+
     def _json(self, status: int, obj):
         self._send(status, json.dumps(obj, default=str).encode(), "application/json")
 
     def _read_json(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
-        return json.loads(self.rfile.read(n) or b"{}") if n else {}
+        data = self.rfile.read(n) if n else b""
+        self._consumed = True
+        return json.loads(data or b"{}")
 
     # -- routing --------------------------------------------------------------------
 
     def _dispatch(self):
         url = urlsplit(self.path)
         path = url.path
+        self.adapter.set_actor(None)
+        self.session, self.role, self._consumed = None, None, False
         try:
+            need = required_role(self.command, path)
+            if need is None:
+                return self._json(404, {"error": "not found"})
+            if need == DENY:
+                return self._json(403, {"error": "not available through the dashboard"})
+            if need != PUBLIC:
+                resolved = self.auth.resolve(Auth.token_from(self.headers.get("Cookie")))
+                if resolved is None:
+                    if self.command == "GET" and path in ("/", "/index.html", "/static/index.html"):
+                        return self._send(302, b"", "text/plain", {"Location": "/login"})
+                    return self._json(401, {"error": "login required"})
+                self.session, self.role = resolved
+                if RANK[self.role] < RANK[need]:
+                    return self._json(403, {"error": "admin access required"})
+                if self.command not in ("GET", "HEAD") and not self._csrf_ok():
+                    return self._json(403, {"error": "missing or invalid CSRF token"})
+                self.adapter.set_actor(self.session.username)
+            if path == "/login":
+                return self._static("/login.html")
+            if path == "/api/login":
+                return self._login()
+            if path == "/api/logout":
+                self.auth.logout(self.session.token)
+                return self._send(200, b'{"ok": true}', "application/json",
+                                  {"Set-Cookie": self.auth.clear_cookie()})
+            if path == "/api/session":
+                return self._json(200, {"username": self.session.username, "role": self.role,
+                                        "csrf": self.session.csrf})
             if path.startswith("/api/gw/"):
                 return self._proxy(path[len("/api/gw"):], url.query)
             if path == "/api/snapshot" and self.command == "GET":
-                return self._json(200, self.adapter.snapshot())
+                snap = self.adapter.snapshot()
+                return self._json(200, snap if self.role == ADMIN else for_viewer(snap))
             if path.startswith("/api/verify/") and self.command == "POST":
                 bucket, _, key = path[len("/api/verify/"):].partition("/")
                 return self._json(200, self.adapter.verify(unquote(bucket), unquote(key)))
@@ -331,8 +485,50 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(502, {"error": "upstream unavailable", "detail": str(e)})
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
+        finally:
+            self.adapter.set_actor(None)
 
     do_GET = do_PUT = do_POST = do_DELETE = do_HEAD = _dispatch
+
+    def _same_origin(self) -> bool:
+        origin = self.headers.get("Origin")
+        return not origin or urlsplit(origin).netloc == self.headers.get("Host", "")
+
+    def _csrf_ok(self) -> bool:
+        sent = self.headers.get("X-CSRF-Token") or ""
+        return self._same_origin() and bool(sent) and hmac.compare_digest(sent, self.session.csrf)
+
+    def _login(self):
+        if not self._same_origin():
+            return self._json(403, {"error": "cross-origin login refused"})
+        if not (self.headers.get("Content-Type") or "").startswith("application/json"):
+            return self._json(415, {"error": "expected application/json"})
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = -1
+        if not 0 < n <= 4096:
+            self.close_connection = True
+            return self._json(400, {"error": "bad request"})
+        raw = self.rfile.read(n)
+        self._consumed = True
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            return self._json(400, {"error": "bad request"})
+        username = body.get("username") if isinstance(body, dict) else None
+        password = body.get("password") if isinstance(body, dict) else None
+        if not isinstance(username, str) or not isinstance(password, str):
+            return self._json(400, {"error": "username and password required"})
+        ip = self.client_address[0]
+        if self.auth.throttled(ip, username):
+            return self._json(429, {"error": "Too many failed attempts. Try again in a few minutes."})
+        session = self.auth.login(username, password, ip)
+        if session is None:
+            return self._json(401, {"error": "Invalid username or password."})
+        role = self.auth.users.get(username)["role"]
+        body = json.dumps({"username": username, "role": role, "csrf": session.csrf}).encode()
+        return self._send(200, body, "application/json", {"Set-Cookie": self.auth.cookie(session.token)})
 
     def _static(self, path: str):
         rel = "index.html" if path in ("", "/") else path.lstrip("/")
@@ -361,6 +557,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.command in ("PUT", "POST"):
             headers["Content-Length"] = str(length)
             body = _LimitedReader(self.rfile, length)
+            self._consumed = True  # streamed upstream (or the connection is closed on error)
 
         a = self.adapter
         conn = http.client.HTTPConnection(a.gw_host, a.gw_port, timeout=a.gateway_timeout)
@@ -372,6 +569,7 @@ class Handler(BaseHTTPRequestHandler):
                 if resp.getheader(h) is not None:
                     self.send_header(h, resp.getheader(h))
             self.send_header("Cache-Control", "no-store")
+            self._security_headers()
             parts = [unquote(p) for p in gw_path.strip("/").split("/", 2)]
             is_object = parts[0] == "buckets" and len(parts) == 3
             if download and is_object:
@@ -393,6 +591,7 @@ class Handler(BaseHTTPRequestHandler):
                     small += block
             self._observe(parts, resp.status, sent, small)
         except (OSError, http.client.HTTPException) as e:
+            self.close_connection = True  # the request body may be partly unread
             if not self.wfile.closed:
                 try:
                     self._json(502, {"error": "gateway unavailable", "detail": str(e)})
@@ -436,9 +635,19 @@ class _Server(ThreadingHTTPServer):
         pass  # browsers abort requests (navigation, polling) all the time
 
 
-def make_server(gateway: str, host: str = "127.0.0.1", port: int = 8090) -> tuple[_Server, Adapter]:
+def make_server(gateway: str, host: str = "127.0.0.1", port: int = 8090, *, users,
+                secure_cookie: bool = False, frame_ancestors=(), idle_timeout: float = 30 * 60,
+                max_age: float = 12 * 3600) -> tuple[_Server, Adapter]:
+    """Build the dashboard server. ``users`` is a users file path or UserStore (required)."""
+    store = users if isinstance(users, UserStore) else UserStore(users)
+    if store.count() == 0:
+        raise ValueError(f"no dashboard users in {store.path}; add one with: "
+                         f"python3 dashboard/auth.py --users {store.path} add NAME --role admin")
+    auth = Auth(store, idle_timeout=idle_timeout, max_age=max_age, secure_cookie=secure_cookie)
     adapter = Adapter(gateway)
-    handler = type("DashboardHandler", (Handler,), {"adapter": adapter})
+    ancestors = " ".join(["'self'", *frame_ancestors])
+    handler = type("DashboardHandler", (Handler,), {"adapter": adapter, "auth": auth,
+                                                    "frame_ancestors": ancestors})
     return _Server((host, port), handler), adapter
 
 
@@ -448,8 +657,21 @@ def main(argv=None) -> None:
                    help="URL of a running Vault gateway")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8090)
+    p.add_argument("--users", default=os.environ.get("VAULT_DASHBOARD_USERS"),
+                   help="users file (or VAULT_DASHBOARD_USERS); manage it with dashboard/auth.py")
+    p.add_argument("--secure-cookie", action="store_true",
+                   help="mark the session cookie Secure (use when served over HTTPS)")
+    p.add_argument("--frame-ancestor", action="append", default=[],
+                   help="origin allowed to embed the dashboard in an iframe (repeatable)")
     args = p.parse_args(argv)
-    server, adapter = make_server(args.gateway, args.host, args.port)
+    if not args.users:
+        p.error("--users is required (see dashboard/auth.py to create users)")
+    try:
+        server, adapter = make_server(args.gateway, args.host, args.port, users=args.users,
+                                      secure_cookie=args.secure_cookie,
+                                      frame_ancestors=args.frame_ancestor)
+    except ValueError as e:
+        p.error(str(e))
     print(f"Vault dashboard on http://{args.host}:{server.server_address[1]}  "
           f"(gateway {adapter.gateway_url})", flush=True)
     stop = threading.Event()

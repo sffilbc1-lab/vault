@@ -21,9 +21,16 @@
     <span class="brand-name">VAULT</span>
     <span class="brand-sub">distributed object storage</span>
   </a>
-  <div class="topbar-status" id="conn">
-    <span class="pulse" aria-hidden="true"></span>
-    <span id="conn-text">Connecting…</span>
+  <div class="topbar-right">
+    <div class="topbar-status" id="conn">
+      <span class="pulse" aria-hidden="true"></span>
+      <span id="conn-text">Connecting…</span>
+    </div>
+    <div class="user-chip" id="user-chip" hidden>
+      <span class="user-name" id="user-name"></span>
+      <span class="user-role" id="user-role"></span>
+      <button class="btn sm ghost" id="logout" type="button">Log out</button>
+    </div>
   </div>
 </header>
 
@@ -90,7 +97,7 @@
           <span><i class="dot info"></i>draining</span>
         </div>
       </div>
-      <div class="callout demo">
+      <div class="callout demo admin-only">
         <strong>Demo controls.</strong> “Simulate failure” uses the node’s built-in fault injection to make it stop answering, exactly like a crash or a network partition. Vault notices within seconds, marks it failed, and rebuilds its data elsewhere. “Restore” brings it back.
       </div>
       <div id="node-grid" class="node-zones"></div>
@@ -103,10 +110,10 @@
           <h1>Objects</h1>
           <p class="hint">Uploads are chunked, then replicated or erasure-coded across nodes according to the bucket's policy.</p>
         </div>
-        <button class="btn ghost" id="new-bucket-toggle" type="button">+ New bucket</button>
+        <button class="btn ghost admin-only" id="new-bucket-toggle" type="button">+ New bucket</button>
       </div>
 
-      <form class="panel bucket-form" id="bucket-form" hidden>
+      <form class="panel bucket-form admin-only" id="bucket-form" hidden>
         <div class="panel-head"><h2>Create bucket</h2></div>
         <div class="form-row">
           <label>Name<input name="name" required pattern="[A-Za-z0-9._-]{1,63}" placeholder="e.g. archive" autocomplete="off"></label>
@@ -129,7 +136,7 @@
 
       <div id="bucket-bar" class="bucket-bar"></div>
 
-      <div class="panel upload" id="upload-panel">
+      <div class="panel upload admin-only" id="upload-panel">
         <label class="drop" id="drop">
           <input type="file" id="file-input" multiple hidden>
           <div class="drop-body">
@@ -161,7 +168,7 @@
           <h1>Repair &amp; recovery</h1>
           <p class="hint">Vault's repair service finds chunks with fewer copies than their policy requires and rebuilds the most endangered first.</p>
         </div>
-        <button class="btn" id="run-maint" type="button">Run maintenance pass now</button>
+        <button class="btn admin-only" id="run-maint" type="button">Run maintenance pass now</button>
       </div>
       <div class="kpis" id="repair-kpis"></div>
       <div class="panel" id="recovery-panel"></div>
@@ -187,7 +194,7 @@
           <h1>Integrity</h1>
           <p class="hint">Every byte is checked against its SHA-256 at each step: when written, whenever read, and during background scrubs.</p>
         </div>
-        <button class="btn" id="run-scrub" type="button">Run verification pass</button>
+        <button class="btn admin-only" id="run-scrub" type="button">Run verification pass</button>
       </div>
       <ol class="checks">
         <li><b>Write</b>Node rejects any blob whose bytes don't match the checksum sent with it.</li>

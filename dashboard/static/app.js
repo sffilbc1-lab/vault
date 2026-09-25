@@ -16,6 +16,7 @@ function setHTML(el, html) {
 
 // ---------------------------------------------------------------- state
 const state = {
+  session: null,         // {username, role, csrf} from the server; never credentials
   snap: null,
   skew: 0,               // adapter clock - browser clock (seconds)
   samples: [],           // redundancy samples taken by this page
@@ -194,7 +195,7 @@ function evHTML(e) {
   state.seen.add(id);
   return `<div class="ev${fresh ? " new" : ""}">
     <span class="dot ${d.tone}"></span>
-    <div><div class="ev-title">${d.title}${e.count > 1 ? `<span class="x">×${e.count}</span>` : ""}${e.source === "dashboard" ? '<span class="src">dashboard</span>' : ""}</div>
+    <div><div class="ev-title">${d.title}${e.count > 1 ? `<span class="x">×${e.count}</span>` : ""}${e.source === "dashboard" ? '<span class="src">dashboard</span>' : ""}${e.user ? `<span class="src">by ${esc(e.user)}</span>` : ""}</div>
     ${d.detail ? `<div class="ev-detail">${d.detail}</div>` : ""}</div>
     <div class="ev-time" title="${esc(new Date(e.ts * 1000).toString())}">${clock(e.ts)}<br>${agoSpan(e.ts)}</div>
   </div>`;
@@ -304,11 +305,11 @@ function renderChrome(snap, a) {
   conn.classList.toggle("live", !!ok);
   conn.classList.toggle("down", !ok);
   $("#conn-text").textContent = ok
-    ? `Live · ${snap.gateway.url.replace(/^https?:\/\//, "")} · ${snap.gateway.latency_ms} ms`
+    ? `Live${snap.gateway.url ? ` · ${snap.gateway.url.replace(/^https?:\/\//, "")}` : ""} · ${snap.gateway.latency_ms} ms`
     : "Gateway unreachable";
   const core = $(".brand-mark .core");
   if (core) core.style.fill = a.level === "ok" ? "var(--ok)" : a.level === "warn" ? "var(--warn)" : "var(--bad)";
-  setHTML($("#rail-foot"), ok ? `gateway<br>${esc(snap.gateway.url)}<br>refresh ${POLL_MS / 1000}s` : "");
+  setHTML($("#rail-foot"), ok ? `${snap.gateway.url ? `gateway<br>${esc(snap.gateway.url)}<br>` : ""}refresh ${POLL_MS / 1000}s` : "");
   if (!ok) return;
   const down = a.dead + a.suspect;
   const bn = $("#b-nodes"); bn.textContent = down ? `${down} down` : a.nodes.length;
@@ -420,7 +421,7 @@ function renderNodes(snap, a) {
       const act = lines.length ? esc(lines.join(" · ")) : "No events involving this node in the last 60 s";
       return `<article class="node ${st.cls}">
         <div class="node-top"><div><div class="node-id">${esc(n.id)}${simulated ? '<span class="tag demo">simulated</span>' : ""}</div>
-          <div class="node-addr">${esc(n.addr)} · weight ${n.weight}</div></div>
+          <div class="node-addr">${n.addr ? `${esc(n.addr)} · ` : ""}weight ${n.weight}</div></div>
           <span class="state"><i></i>${esc(st.label)}</span></div>
         <div class="stats">
           <div><div class="stat-label">Replicas tracked</div><div class="stat-value">${n.replicas}</div></div>
@@ -430,7 +431,7 @@ function renderNodes(snap, a) {
           <div><div class="stat-label">Direct probe</div><div class="stat-value">${l.reachable ? `<span data-lat="${esc(n.id)}"></span>` : "no answer"}</div></div>
         </div>
         <div class="activity-line">${act}</div>
-        <div class="node-actions">
+        <div class="node-actions admin-only">
           ${simulated
             ? `<button class="btn sm ok" data-action="restore" data-node="${esc(n.id)}">Restore node</button>`
             : `<button class="btn sm danger" data-action="fail" data-node="${esc(n.id)}" ${l.faults ? "" : "disabled"}>Simulate failure</button>`}
@@ -444,8 +445,8 @@ function renderObjects(snap) {
   const buckets = snap.buckets || [];
   if (!snap.gateway?.ok) return;
   if (!buckets.length) {
-    setHTML($("#bucket-bar"), `<div class="callout" style="flex:1">No buckets yet. Create one with a durability policy:
-      <div class="form-actions"><button class="btn sm" data-preset="replicate">Create “files” · 3 copies</button>
+    setHTML($("#bucket-bar"), `<div class="callout" style="flex:1">No buckets yet.${state.session?.role === "admin" ? " Create one with a durability policy:" : " An admin can create one."}
+      <div class="form-actions admin-only"><button class="btn sm" data-preset="replicate">Create “files” · 3 copies</button>
       <button class="btn sm ghost" data-preset="erasure">Create “archive” · erasure 4+2</button></div></div>`);
     $("#upload-panel").hidden = true;
     setHTML($("#objects-table"), "");
@@ -491,7 +492,7 @@ function renderObjectTable(bucket, p) {
         <td><span class="pill ok">stored</span><div class="sub">v${o.version} · ${agoSpan(o.created)}</div></td>
         <td><span class="pill info">${p.label}</span><div class="sub">survives ${plural(p.tol, "failure")}</div></td>
         <td>${integ}</td>
-        <td class="actions"><a class="btn sm ghost" href="${href}" download>Download</a><button class="btn sm ghost" data-verify="${esc(o.key)}">Verify</button><button class="btn sm danger" data-delete="${esc(o.key)}">Delete</button></td></tr>`;
+        <td class="actions"><a class="btn sm ghost" href="${href}" download>Download</a><button class="btn sm ghost" data-verify="${esc(o.key)}">Verify</button><button class="btn sm danger admin-only" data-delete="${esc(o.key)}">Delete</button></td></tr>`;
     }).join("")}</tbody>`);
 }
 
@@ -596,14 +597,40 @@ function render() {
 }
 
 // ---------------------------------------------------------------- data
+function authHeaders(method, headers = {}) {
+  // State-changing requests carry the session's CSRF token (checked server-side).
+  return method === "GET" || method === "HEAD" ? headers : { ...headers, "X-CSRF-Token": state.session?.csrf || "" };
+}
+
+function toLogin() { location.replace("/login"); }
+
 async function api(method, path, body, headers) {
-  const r = await fetch(path, { method, body, headers, cache: "no-store" });
+  const r = await fetch(path, { method, body, headers: authHeaders(method, headers), cache: "no-store" });
+  if (r.status === 401) { toLogin(); throw new Error("Signed out"); }
   const text = await r.text();
   let j = null;
   try { j = JSON.parse(text); } catch { /* not JSON */ }
+  if (r.status === 403) throw new Error(j?.error === "admin access required" ? "This needs an admin account." : (j?.error || "Not allowed"));
   if (!r.ok) throw new Error(j?.detail || j?.error || `HTTP ${r.status}`);
   return j;
 }
+
+async function loadSession() {
+  const r = await fetch("/api/session", { cache: "no-store" });
+  if (!r.ok) { toLogin(); throw new Error("login required"); }
+  state.session = await r.json();
+  document.body.dataset.role = state.session.role;
+  $("#user-name").textContent = state.session.username;
+  const role = $("#user-role");
+  role.textContent = state.session.role;
+  role.classList.toggle("admin", state.session.role === "admin");
+  $("#user-chip").hidden = false;
+}
+
+$("#logout").addEventListener("click", async () => {
+  try { await fetch("/api/logout", { method: "POST", headers: authHeaders("POST"), cache: "no-store" }); }
+  finally { toLogin(); }
+});
 
 async function poll() {
   if (state.inflight) return;
@@ -731,6 +758,7 @@ function uploadOne(bucket, key, file, row) {
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", `/api/gw/buckets/${enc(bucket)}/${enc(key)}`);
+    xhr.setRequestHeader("X-CSRF-Token", state.session?.csrf || "");
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) $(".pbar span", row).style.width = `${(e.loaded / e.total) * 100}%`; };
     xhr.onload = () => {
       let j = null; try { j = JSON.parse(xhr.responseText); } catch { /* ignore */ }
@@ -742,6 +770,7 @@ function uploadOne(bucket, key, file, row) {
         row.classList.add("fail");
         $(".msg", row).textContent = j?.detail || j?.error || `HTTP ${xhr.status}`;
       }
+      if (xhr.status === 401) toLogin();
       resolve(xhr.status === 200);
     };
     xhr.onerror = () => { row.classList.add("fail"); $(".msg", row).textContent = "network error"; resolve(false); };
@@ -829,4 +858,4 @@ window.addEventListener("resize", () => { $("#chart-redundancy")._h = null; $("#
 setInterval(tick, 500);
 setInterval(poll, POLL_MS);
 setInterval(() => { if (state.view === "objects") loadObjects(); }, OBJECTS_MS);
-poll().then(route);
+loadSession().then(() => poll()).then(route).catch(() => { /* redirected to login */ });
