@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vault Console</title>
+<meta name="description" content="Live console for the Vault distributed object store">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230c1017'/%3E%3Cg fill='%2334d399'%3E%3Crect x='3' y='3' width='3' height='3'/%3E%3Crect x='10' y='3' width='3' height='3'/%3E%3Crect x='3' y='10' width='3' height='3'/%3E%3C/g%3E%3Crect x='10' y='10' width='3' height='3' fill='%23fbbf24'/%3E%3Crect x='6.5' y='6.5' width='3' height='3' fill='%2334d399'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#overview" aria-label="Vault overview">
+    <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="2" y="2" width="6" height="6" rx="1.2"/><rect x="9" y="2" width="6" height="6" rx="1.2"/>
+      <rect x="16" y="2" width="6" height="6" rx="1.2"/><rect x="2" y="9" width="6" height="6" rx="1.2"/>
+      <rect x="9" y="9" width="6" height="6" rx="1.2" class="core"/><rect x="16" y="9" width="6" height="6" rx="1.2"/>
+      <rect x="2" y="16" width="6" height="6" rx="1.2"/><rect x="9" y="16" width="6" height="6" rx="1.2"/>
+      <rect x="16" y="16" width="6" height="6" rx="1.2"/>
+    </svg>
+    <span class="brand-name">VAULT</span>
+    <span class="brand-sub">distributed object storage</span>
+  </a>
+  <div class="topbar-status" id="conn">
+    <span class="pulse" aria-hidden="true"></span>
+    <span id="conn-text">Connecting…</span>
+  </div>
+</header>
+
+<div class="shell">
+  <nav class="rail" aria-label="Sections">
+    <a href="#overview" data-nav="overview">Overview</a>
+    <a href="#nodes" data-nav="nodes">Nodes <span class="badge" id="b-nodes"></span></a>
+    <a href="#objects" data-nav="objects">Objects <span class="badge" id="b-objects"></span></a>
+    <a href="#repair" data-nav="repair">Repair <span class="badge" id="b-repair"></span></a>
+    <a href="#integrity" data-nav="integrity">Integrity <span class="badge" id="b-integrity"></span></a>
+    <a href="#activity" data-nav="activity">Activity</a>
+    <div class="rail-foot" id="rail-foot"></div>
+  </nav>
+
+  <main id="main">
+    <!-- OVERVIEW -->
+    <section class="view" data-view="overview">
+      <div class="hero" id="hero"></div>
+      <div class="panel topo-panel">
+        <div class="panel-head">
+          <h2>Cluster topology</h2>
+          <p class="hint">Each tile is an independent storage node. Data is split into chunks and spread across nodes in different zones.</p>
+        </div>
+        <div id="topology" class="topology"></div>
+      </div>
+      <div class="kpis" id="kpis"></div>
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Redundancy over time</h2>
+            <p class="hint" id="chart-note"></p>
+          </div>
+          <div id="chart-redundancy" class="chart"></div>
+          <div id="chart-nodes" class="chart chart-sm"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Durability policies</h2>
+            <p class="hint">Configured per bucket. Tolerance is how many nodes can fail at once without losing data.</p>
+          </div>
+          <div id="policies"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head row">
+          <h2>Recent activity</h2>
+          <a class="link" href="#activity">All events →</a>
+        </div>
+        <div id="recent" class="feed"></div>
+      </div>
+    </section>
+
+    <!-- NODES -->
+    <section class="view" data-view="nodes" hidden>
+      <div class="view-head">
+        <div>
+          <h1>Storage nodes</h1>
+          <p class="hint">Health comes from Vault's failure detector (heartbeats every second). Disk figures come from each node's own <code>/health</code> endpoint.</p>
+        </div>
+        <div class="legend">
+          <span><i class="dot ok"></i>alive</span>
+          <span><i class="dot warn"></i>suspect</span>
+          <span><i class="dot bad"></i>failed</span>
+          <span><i class="dot info"></i>draining</span>
+        </div>
+      </div>
+      <div class="callout demo">
+        <strong>Demo controls.</strong> “Simulate failure” uses the node’s built-in fault injection to make it stop answering, exactly like a crash or a network partition. Vault notices within seconds, marks it failed, and rebuilds its data elsewhere. “Restore” brings it back.
+      </div>
+      <div id="node-grid" class="node-zones"></div>
+    </section>
+
+    <!-- OBJECTS -->
+    <section class="view" data-view="objects" hidden>
+      <div class="view-head">
+        <div>
+          <h1>Objects</h1>
+          <p class="hint">Uploads are chunked, then replicated or erasure-coded across nodes according to the bucket's policy.</p>
+        </div>
+        <button class="btn ghost" id="new-bucket-toggle" type="button">+ New bucket</button>
+      </div>
+
+      <form class="panel bucket-form" id="bucket-form" hidden>
+        <div class="panel-head"><h2>Create bucket</h2></div>
+        <div class="form-row">
+          <label>Name<input name="name" required pattern="[A-Za-z0-9._-]{1,63}" placeholder="e.g. archive" autocomplete="off"></label>
+          <label>Policy
+            <select name="scheme">
+              <option value="replicate">Replication</option>
+              <option value="erasure">Erasure coding</option>
+            </select>
+          </label>
+          <label data-for="replicate">Copies (n)<input name="n" type="number" min="1" max="16" value="3"></label>
+          <label data-for="erasure" hidden>Data shards (k)<input name="k" type="number" min="1" max="32" value="4"></label>
+          <label data-for="erasure" hidden>Parity shards (m)<input name="m" type="number" min="0" max="16" value="2"></label>
+        </div>
+        <p class="hint" id="policy-preview"></p>
+        <div class="form-actions">
+          <button class="btn" type="submit">Create bucket</button>
+          <button class="btn ghost" type="button" id="bucket-cancel">Cancel</button>
+        </div>
+      </form>
+
+      <div id="bucket-bar" class="bucket-bar"></div>
+
+      <div class="panel upload" id="upload-panel">
+        <label class="drop" id="drop">
+          <input type="file" id="file-input" multiple hidden>
+          <div class="drop-body">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0-4.5 4.5M12 4l4.5 4.5M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15"/></svg>
+            <div>
+              <strong>Drop files to upload</strong> or <span class="link">browse</span>
+              <div class="hint" id="upload-target"></div>
+            </div>
+          </div>
+        </label>
+        <label class="prefix">Key prefix <input id="key-prefix" placeholder="optional, e.g. photos/" autocomplete="off"></label>
+        <div id="uploads" class="uploads"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head row">
+          <h2 id="objects-title">Objects</h2>
+          <input id="object-filter" class="search" placeholder="Filter by key…" autocomplete="off">
+        </div>
+        <div class="table-wrap"><table class="table" id="objects-table"></table></div>
+        <p class="hint note">Integrity is checked by downloading the object through Vault and recomputing its SHA-256 against the checksum recorded at write time. Vault's API does not expose which nodes hold a specific object's chunks, so per-object placement is not shown.</p>
+      </div>
+    </section>
+
+    <!-- REPAIR -->
+    <section class="view" data-view="repair" hidden>
+      <div class="view-head">
+        <div>
+          <h1>Repair &amp; recovery</h1>
+          <p class="hint">Vault's repair service finds chunks with fewer copies than their policy requires and rebuilds the most endangered first.</p>
+        </div>
+        <button class="btn" id="run-maint" type="button">Run maintenance pass now</button>
+      </div>
+      <div class="kpis" id="repair-kpis"></div>
+      <div class="panel" id="recovery-panel"></div>
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>Completed repairs</h2><p class="hint">From Vault's event log. Each row is one rebuilt replica or erasure-coded shard.</p></div>
+          <div class="table-wrap"><table class="table compact" id="repairs-table"></table></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Failed repairs / data at risk</h2><p class="hint">Chunks Vault could not rebuild because too few intact copies were reachable.</p></div>
+          <div id="risk-list" class="feed"></div>
+          <div class="panel-head sub"><h3>Last manual maintenance pass</h3></div>
+          <div id="maint-result"></div>
+        </div>
+      </div>
+      <p class="hint note">Not available from Vault's API: live progress of an individual repair, and which objects a repaired chunk belongs to (events identify chunks by content hash).</p>
+    </section>
+
+    <!-- INTEGRITY -->
+    <section class="view" data-view="integrity" hidden>
+      <div class="view-head">
+        <div>
+          <h1>Integrity</h1>
+          <p class="hint">Every byte is checked against its SHA-256 at each step: when written, whenever read, and during background scrubs.</p>
+        </div>
+        <button class="btn" id="run-scrub" type="button">Run verification pass</button>
+      </div>
+      <ol class="checks">
+        <li><b>Write</b>Node rejects any blob whose bytes don't match the checksum sent with it.</li>
+        <li><b>Store</b>Checksum is kept in the blob header on disk; writes are atomic.</li>
+        <li><b>Read</b>Node re-verifies before serving; the gateway verifies again after transfer.</li>
+        <li><b>Scrub</b>Background passes re-verify everything at rest; bad copies are quarantined and rebuilt.</li>
+      </ol>
+      <div class="kpis" id="integrity-kpis"></div>
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>Corruption &amp; loss detections</h2><p class="hint">Bad or missing replicas Vault detected, and whether a repair for that chunk followed.</p></div>
+          <div class="table-wrap"><table class="table compact" id="corrupt-table"></table></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Recent verification activity</h2><p class="hint">Verification passes and object checks run from this dashboard.</p></div>
+          <div id="verify-feed" class="feed"></div>
+        </div>
+      </div>
+      <p class="hint note">Vault's background scrub runs on its own schedule and does not report when it last ran; “Run verification pass” triggers one immediately and shows its result.</p>
+    </section>
+
+    <!-- ACTIVITY -->
+    <section class="view" data-view="activity" hidden>
+      <div class="view-head">
+        <div>
+          <h1>Activity</h1>
+          <p class="hint">Vault's own event log, merged with operations performed through this dashboard (marked <span class="src">dashboard</span>). Vault does not log object uploads, downloads or rebalancing moves itself.</p>
+        </div>
+      </div>
+      <div class="chips" id="filters"></div>
+      <div class="panel"><div id="feed" class="feed big"></div></div>
+    </section>
+  </main>
+</div>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<script src="/static/app.js" type="module"></script>
+</body>
+</html>

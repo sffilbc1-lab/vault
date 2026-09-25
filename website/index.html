@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vault — storage that expects things to fail</title>
+<meta name="description" content="Vault splits every file across independent storage nodes, keeps enough extra pieces to survive failures, and rebuilds what's missing on its own.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230c1017'/%3E%3Cg fill='%237dd3fc'%3E%3Crect x='3' y='3' width='3' height='3'/%3E%3Crect x='10' y='3' width='3' height='3'/%3E%3Crect x='3' y='10' width='3' height='3'/%3E%3Crect x='10' y='10' width='3' height='3'/%3E%3C/g%3E%3Crect x='6.5' y='6.5' width='3' height='3' fill='%23e6ebf1'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="site.css">
+<link rel="stylesheet" href="ask.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="nav">
+  <a class="brand" href="#top" aria-label="Vault home">
+    <svg viewBox="0 0 24 24" aria-hidden="true" class="mark">
+      <rect x="2" y="2" width="6" height="6" rx="1.2"/><rect x="16" y="2" width="6" height="6" rx="1.2"/>
+      <rect x="9" y="9" width="6" height="6" rx="1.2" class="core"/>
+      <rect x="2" y="16" width="6" height="6" rx="1.2"/><rect x="16" y="16" width="6" height="6" rx="1.2"/>
+    </svg>
+    <span>VAULT</span>
+  </a>
+  <nav aria-label="Page">
+    <a href="#how">How it works</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#engineering">Engineering</a>
+    <a class="btn sm console-link" href="http://127.0.0.1:8090/">Live console</a>
+  </nav>
+</header>
+
+<main id="main">
+  <!-- 1 HERO -->
+  <section class="hero" id="top">
+    <div class="hero-copy">
+      <p class="eyebrow">Vault · distributed object storage</p>
+      <h1>Storage that expects things&nbsp;to&nbsp;fail.</h1>
+      <p class="lede">Vault splits every file into pieces, spreads them across independent machines, and quietly rebuilds whatever a failure takes away, so your data stays readable while hardware comes and goes.</p>
+      <div class="ctas">
+        <a class="btn console-link" href="http://127.0.0.1:8090/">Open Live Console <span aria-hidden="true">→</span></a>
+        <a class="btn ghost" href="#how">See How Vault Works</a>
+      </div>
+      <p class="console-status" data-console-status></p>
+    </div>
+
+    <figure class="stage" aria-labelledby="life-caption">
+      <div class="stage-top">
+        <span class="stage-title">The life of one file</span>
+        <span class="illus">Illustrative · not live data</span>
+      </div>
+      <div class="map-host" id="hero-map"></div>
+      <div class="readout" aria-hidden="true"><i class="dot" id="life-dot"></i><span id="life-readout"></span></div>
+      <figcaption>
+        <ol class="stepper" id="life-steps" aria-label="Lifecycle stages"></ol>
+        <div class="caption-row">
+          <p id="life-caption" class="caption"></p>
+          <button class="icon-btn" id="life-toggle" type="button" aria-label="Pause animation">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path class="i-pause" d="M5 3h2v10H5zM9 3h2v10H9z"/><path class="i-play" d="M5 3l8 5-8 5z"/></svg>
+          </button>
+        </div>
+      </figcaption>
+    </figure>
+  </section>
+
+  <!-- 2 THE PROBLEM -->
+  <section class="sec" id="how">
+    <header class="sec-head">
+      <p class="idx">01</p>
+      <div>
+        <h2>Machines fail. Quietly, and all the time.</h2>
+        <p class="sub">At scale, something is always broken somewhere. A storage system has to assume it. These are the four failures Vault is built around.</p>
+      </div>
+    </header>
+    <div class="problems">
+      <figure class="problem">
+        <div class="map-host mini" data-problem="crash"></div>
+        <figcaption><b>Nodes crash</b>A disk dies or a machine reboots, and everything on it is out of reach.<span class="answer">Vault notices through missed heartbeats.</span></figcaption>
+      </figure>
+      <figure class="problem">
+        <div class="map-host mini" data-problem="partition"></div>
+        <figcaption><b>Networks split</b>The node is fine, but nobody can reach it. From outside, that looks like a crash.<span class="answer">Writes need enough acks from reachable nodes; unreachable is never treated as “saved”.</span></figcaption>
+      </figure>
+      <figure class="problem">
+        <div class="map-host mini" data-problem="missing"></div>
+        <figcaption><b>Copies go missing</b>A replica that should be there isn't: a wiped disk, a half-finished operation.<span class="answer">Background checks compare every node's contents with the record of what should be there.</span></figcaption>
+      </figure>
+      <figure class="problem">
+        <div class="map-host mini" data-problem="rot"></div>
+        <figcaption><b>Bits rot</b>Stored data silently changes. The file still “exists”, but it is wrong.<span class="answer">Every piece carries a SHA-256 checksum that is checked on write, on read and during scrubs.</span></figcaption>
+      </figure>
+    </div>
+    <p class="aside">Copies can't quietly drift apart in Vault: pieces are immutable and named by their content hash. A copy can only be missing or damaged, and both are detected.</p>
+  </section>
+
+  <!-- 3 ONE OBJECT, MANY NODES -->
+  <section class="sec" id="distribution">
+    <header class="sec-head">
+      <p class="idx">02</p>
+      <div>
+        <h2>One file, many nodes.</h2>
+        <p class="sub">Each bucket has a durability policy that decides how a file is spread. Pieces go to different zones first, so one failing rack or room can't take them all.</p>
+      </div>
+    </header>
+    <div class="split">
+      <figure class="stage flat">
+        <div class="stage-top">
+          <div class="seg" role="tablist" aria-label="Durability policy">
+            <button role="tab" aria-selected="true" data-policy="replicate">Replication ×3</button>
+            <button role="tab" aria-selected="false" data-policy="erasure">Erasure coding 4+2</button>
+          </div>
+          <span class="illus">Illustrative</span>
+        </div>
+        <div class="map-host" id="policy-map"></div>
+      </figure>
+      <dl class="facts" id="policy-facts"></dl>
+    </div>
+  </section>
+
+  <!-- 4 FAILURE IS EXPECTED -->
+  <section class="sec" id="failure">
+    <header class="sec-head">
+      <p class="idx">03</p>
+      <div>
+        <h2>Failure is expected.</h2>
+        <p class="sub">With erasure coding 4+2, any four of the six pieces rebuild the file. Take nodes offline yourself and watch what still works.</p>
+      </div>
+    </header>
+    <div class="split">
+      <figure class="stage flat">
+        <div class="stage-top">
+          <span class="stage-title">Click a node to take it offline</span>
+          <span class="illus">Illustrative · repair paused</span>
+        </div>
+        <div class="map-host" id="fail-map"></div>
+      </figure>
+      <div class="meter-panel">
+        <p class="meter-label">Pieces reachable</p>
+        <p class="meter-big"><span id="fail-count">6</span><small>/ 6 &nbsp;· 4 needed</small></p>
+        <div class="cells" id="fail-cells" aria-hidden="true"></div>
+        <p class="verdict" id="fail-verdict" role="status"></p>
+        <button class="btn ghost sm" id="fail-reset" type="button">Bring all nodes back</button>
+        <p class="note">In a real cluster Vault wouldn't wait: once a node is declared failed, repair starts rebuilding its pieces elsewhere. That's the next step.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5 DETECT → REPAIR → RESTORE -->
+  <section class="sec" id="recovery">
+    <header class="sec-head">
+      <p class="idx">04</p>
+      <div>
+        <h2>Detect. Repair. Restore.</h2>
+        <p class="sub">Recovery runs by itself, in the background, while the cluster keeps serving requests.</p>
+      </div>
+    </header>
+    <ol class="triptych" id="triptych">
+      <li>
+        <div class="map-host mini" data-phase="detect"></div>
+        <h3><span>1</span>Detect</h3>
+        <p>Every node is probed each second. A missed probe makes it <em class="t-warn">suspect</em>: new data avoids it, but nothing is moved yet, so a brief blip causes no churn. After a timeout (10&nbsp;s by default) it is declared <em class="t-bad">failed</em>.</p>
+      </li>
+      <li>
+        <div class="map-host mini" data-phase="repair"></div>
+        <h3><span>2</span>Repair</h3>
+        <p>The repair service finds every chunk below its target and fixes the most endangered first. It copies a surviving replica, or rebuilds a missing piece from any four survivors. Rebuilt data is checksum-verified before it is stored.</p>
+      </li>
+      <li>
+        <div class="map-host mini" data-phase="restore"></div>
+        <h3><span>3</span>Restore</h3>
+        <p>New pieces land where the placement map wants them, so nothing needs a second shuffle. If the failed node comes back, the extra copies it still holds are trimmed.</p>
+      </li>
+    </ol>
+    <div class="replay-row"><span class="illus">Illustrative</span><button class="btn ghost sm" id="replay" type="button">Replay</button></div>
+  </section>
+
+  <!-- 6 ARCHITECTURE -->
+  <section class="sec" id="architecture">
+    <header class="sec-head">
+      <p class="idx">05</p>
+      <div>
+        <h2>How it's built.</h2>
+        <p class="sub">The components of the actual implementation and the files they live in.</p>
+      </div>
+    </header>
+    <div class="arch">
+      <div class="arch-lane">
+        <div class="box client"><p class="box-k">Client</p><p>Any HTTP client: <code>curl</code>, a script, the console.</p></div>
+        <div class="wire" data-label="HTTP · buckets &amp; objects"></div>
+        <div class="box gw"><p class="box-k">Gateway <code>core.py · api.py</code></p>
+          <p>Streams files in chunks, replicates or erasure-codes them, and writes to enough nodes to meet the bucket's quorum. Reads verify every byte and ask a second node if the first is slow.</p></div>
+        <div class="wire fork"></div>
+        <div class="pair">
+          <div class="box"><p class="box-k">Metadata <code>metadata.py</code></p><p>SQLite in WAL mode. Objects, versions and piece locations change in single transactions, so a file becomes visible all at once or not at all.</p></div>
+          <div class="box"><p class="box-k">Placement <code>placement.py</code></p><p>Weighted rendezvous hashing, spread across zones. Adding a node moves only its fair share of data.</p></div>
+        </div>
+        <div class="wire" data-label="HTTP · immutable blobs"></div>
+        <div class="box nodes"><p class="box-k">Storage nodes <code>node.py</code></p>
+          <div class="node-row" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          <p>Each node is an independent server storing content-addressed blobs with a SHA-256 header. Writes are atomic; corrupt blobs are quarantined, never served.</p></div>
+      </div>
+      <aside class="arch-bg">
+        <p class="bg-k">In the background</p>
+        <div class="box slim"><p class="box-k">Failure detector <code>membership.py</code></p><p>Heartbeats every node: alive → suspect → failed.</p></div>
+        <div class="box slim"><p class="box-k">Maintenance <code>maintenance.py</code></p>
+          <ul class="jobs"><li><b>repair</b> restores missing copies</li><li><b>scrub</b> re-verifies data at rest</li><li><b>anti-entropy</b> reconciles nodes with metadata</li><li><b>rebalance</b> moves data after membership changes</li><li><b>GC</b> removes what nothing references</li></ul></div>
+        <div class="box slim"><p class="box-k">Erasure coding <code>erasure.py</code></p><p>Reed-Solomon over GF(2⁸), implemented in the project.</p></div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- 7 LIVE SYSTEM -->
+  <section class="sec" id="live">
+    <header class="sec-head">
+      <p class="idx">06</p>
+      <div>
+        <h2>Everything above, running for real.</h2>
+        <p class="sub">The illustrations on this page are simplified. The console is not: it shows the state of an actual Vault cluster, read from its API every two seconds.</p>
+      </div>
+    </header>
+    <div class="live">
+      <ul class="live-list">
+        <li><b>Node health</b> from Vault's failure detector, and disk usage reported by each node.</li>
+        <li><b>Objects</b> with upload, download and end-to-end SHA-256 verification.</li>
+        <li><b>Repairs and detections</b> from Vault's own event log.</li>
+        <li><b>Fault injection</b>: take a node down or flip a bit on disk, and watch recovery happen.</li>
+      </ul>
+      <div class="window">
+        <div class="window-bar"><i></i><i></i><i></i><span data-console-url></span></div>
+        <div class="window-body" id="console-frame">
+          <div class="offline" id="console-offline">
+            <p><b>The console isn't running right now.</b></p>
+            <p>From the <code>vault-v2</code> folder, start a demo cluster and the console:</p>
+            <pre><code>python3 dashboard/run_demo.py</code></pre>
+            <p class="note">This page checks again every few seconds.</p>
+          </div>
+        </div>
+      </div>
+      <a class="btn console-link" href="http://127.0.0.1:8090/">Open Vault Console <span aria-hidden="true">→</span></a>
+    </div>
+  </section>
+
+  <!-- 8 ENGINEERING -->
+  <section class="sec" id="engineering">
+    <header class="sec-head">
+      <p class="idx">07</p>
+      <div>
+        <h2>Engineering.</h2>
+        <p class="sub">Small, dependency-free and tested under failure.</p>
+      </div>
+    </header>
+    <dl class="spec">
+      <div><dt>Language</dt><dd>Python 3.11+, standard library only. No third-party runtime dependencies.</dd></div>
+      <div><dt>Storage nodes</dt><dd><code>http.server</code>; atomic, fsync'd writes; SHA-256 in every blob header.</dd></div>
+      <div><dt>Metadata</dt><dd>SQLite (WAL) with serializable transactions and compare-and-swap versioning.</dd></div>
+      <div><dt>Erasure coding</dt><dd>Reed-Solomon over GF(2⁸) with a Cauchy matrix, written for this project.</dd></div>
+      <div><dt>Placement</dt><dd>Weighted rendezvous hashing, interleaved across zones.</dd></div>
+      <div><dt>Console</dt><dd>Plain HTML, CSS and JavaScript with a small standard-library proxy. No build step.</dd></div>
+      <div><dt>Tests</dt><dd>39 backend tests, including crashes, partitions, bit rot, concurrent writers and a chaos run, plus 8 console tests. The suite passes under a 256-open-file limit.</dd></div>
+      <div><dt>Size</dt><dd>About 2,600 lines of Python for the system itself.</dd></div>
+    </dl>
+  </section>
+</main>
+
+<footer class="foot">
+  <div class="foot-row">
+    <span class="brand small"><svg viewBox="0 0 24 24" aria-hidden="true" class="mark"><rect x="2" y="2" width="6" height="6" rx="1.2"/><rect x="16" y="2" width="6" height="6" rx="1.2"/><rect x="9" y="9" width="6" height="6" rx="1.2" class="core"/><rect x="2" y="16" width="6" height="6" rx="1.2"/><rect x="16" y="16" width="6" height="6" rx="1.2"/></svg>VAULT</span>
+    <nav aria-label="Footer"><a href="#how">How it works</a><a href="#architecture">Architecture</a><a class="console-link" href="http://127.0.0.1:8090/">Live console</a></nav>
+  </div>
+  <p class="foot-note">A fault-tolerant distributed object store. Animations on this page are illustrative; the console shows live system state.</p>
+</footer>
+
+<script type="module" src="site.js"></script>
+<script type="module" src="ask.js"></script>
+</body>
+</html>

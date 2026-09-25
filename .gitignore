@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Local/runtime data
+storage/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Temporary files
+tmp/
+temp/
+*.tmp
