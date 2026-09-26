@@ -1,3 +1,4 @@
+
 // Vault site behaviour. All maps are ILLUSTRATIVE; the live console is linked
 // (and embedded when it is running) for real telemetry.
 //
@@ -18,7 +19,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 // Public deployment: no Live Console is hosted. Set this to a real, publicly
 // reachable console URL to enable the link/embed (and allow its origin in the
 // server's --console option). Empty = never link to, embed or probe any console.
-const PUBLIC_CONSOLE_URL = "";
+const PUBLIC_CONSOLE_URL = "https://untaxed-carving-sterilize.ngrok-free.dev";
 const CONSOLE = PUBLIC_CONSOLE_URL ? PUBLIC_CONSOLE_URL.replace(/\/?$/, "/") : null;
 if (CONSOLE) $$(".console-link").forEach((a) => { a.href = CONSOLE; });
 $$("[data-console-url]").forEach((el) => {
