@@ -847,13 +847,25 @@ function route() {
   const v = (location.hash || "#overview").slice(1);
   state.view = ["overview", "nodes", "objects", "repair", "integrity", "activity"].includes(v) ? v : "overview";
   $$(".view").forEach((s) => { s.hidden = s.dataset.view !== state.view; });
-  $$("[data-nav]").forEach((a) => a.classList.toggle("active", a.dataset.nav === state.view));
+  $$("[data-nav]").forEach((a) => {
+    const on = a.dataset.nav === state.view;
+    a.classList.toggle("active", on);
+    if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+  });
   render();
   if (state.view === "objects") loadObjects();
   window.scrollTo({ top: 0 });
 }
 window.addEventListener("hashchange", route);
-window.addEventListener("resize", () => { $("#chart-redundancy")._h = null; $("#chart-nodes")._h = null; render(); });
+let resizeQueued = false;  // re-render at most once per frame while resizing
+window.addEventListener("resize", () => {
+  if (resizeQueued) return;
+  resizeQueued = true;
+  requestAnimationFrame(() => {
+    resizeQueued = false;
+    $("#chart-redundancy")._h = null; $("#chart-nodes")._h = null; render();
+  });
+});
 
 setInterval(tick, 500);
 setInterval(poll, POLL_MS);

@@ -96,6 +96,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(length))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        if self.close_connection:
+            self.send_header("Connection", "close")  # request body left unread
         self.send_header("Content-Security-Policy",
                          "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
                          "img-src 'self' data:; "
@@ -132,12 +136,15 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         host = self.headers.get("Host", "")
         if origin and urlsplit(origin).netloc != host:
+            self.close_connection = True  # body unread: don't let it become the next request
             return self._json(403, {"error": "cross-origin requests are not allowed"})
         if not (self.headers.get("Content-Type") or "").startswith("application/json"):
+            self.close_connection = True
             return self._json(415, {"error": "expected application/json"})
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
+            self.close_connection = True
             return self._json(400, {"error": "bad length"})
         if length <= 0 or length > MAX_BODY:
             self.close_connection = True

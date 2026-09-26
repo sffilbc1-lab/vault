@@ -96,10 +96,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(length))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        if self.close_connection:
+            self.send_header("Connection", "close")  # request body left unread
         self.send_header("Content-Security-Policy",
                          "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
                          "img-src 'self' data:; "
-                         f"connect-src 'self' {self.console_origin}; frame-src {self.console_origin}; "
+                         f"connect-src 'self'{' ' + self.console_origin if self.console_origin else ''}; "
+                         f"frame-src {self.console_origin or chr(39) + 'none' + chr(39)}; "
                          "frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 
     def _send(self, status: int, body: bytes, ctype: str, cache: str = "no-store"):
@@ -131,12 +136,15 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         host = self.headers.get("Host", "")
         if origin and urlsplit(origin).netloc != host:
+            self.close_connection = True  # body unread: don't let it become the next request
             return self._json(403, {"error": "cross-origin requests are not allowed"})
         if not (self.headers.get("Content-Type") or "").startswith("application/json"):
+            self.close_connection = True
             return self._json(415, {"error": "expected application/json"})
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
+            self.close_connection = True
             return self._json(400, {"error": "bad length"})
         if length <= 0 or length > MAX_BODY:
             self.close_connection = True
@@ -181,7 +189,9 @@ def make_server(host="127.0.0.1", port=8095, console="http://127.0.0.1:8090/", e
         provider, status = provider_override, {"mode": "ai", "provider": "test"}
     assistant = Assistant(provider, make_live_fetch(console), secrets)
     c = urlsplit(console) if console else None
-    console_origin = f"{c.scheme}://{c.netloc}" if c and c.netloc else "'none'"
+    # Empty when no console is configured: then connect-src is 'self' only and frame-src 'none'
+    # ('none' may not be combined with other sources in a CSP directive).
+    console_origin = f"{c.scheme}://{c.netloc}" if c and c.netloc else ""
     public = {**status, "live_console": bool(console)}
     handler = type("SiteHandler", (Handler,), {"assistant": assistant, "status": public,
                                                "limiter": RateLimiter(), "console_origin": console_origin})
